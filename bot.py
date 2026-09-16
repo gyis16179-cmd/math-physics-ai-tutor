@@ -1,16 +1,15 @@
 import os
 import time
 import base64
-import sqlite3
 import threading
 import requests
 
 from flask import Flask, jsonify
 
 
-# =========================
+# =========================================================
 # SETTINGS
-# =========================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -23,37 +22,71 @@ OPENAI_API = "https://api.openai.com/v1/responses"
 app = Flask(__name__)
 
 
-# =========================
-# DATABASE
-# =========================
+# =========================================================
+# AI INSTRUCTIONS
+# =========================================================
 
-DB_FILE = "tutor.db"
+SYSTEM_PROMPT = """
+You are a Math and Physics AI Tutor for a Myanmar high-school student.
+
+IMPORTANT:
+- The user may send a photo containing a Math or Physics question.
+- Carefully inspect and read the image.
+- Do not say that the image is missing if an image was actually provided.
+- Do not ask the user to resend the image unless the image is genuinely unreadable.
+- Never guess a number or symbol that cannot be read clearly.
+
+LANGUAGE:
+- Always explain in simple Burmese.
+- Use English only for necessary mathematical or physics terms.
+
+MATH:
+- Solve step by step.
+- Show important calculations.
+- Do not skip algebra steps.
+- Explain why an important step is performed.
+- Make the final answer clear.
+
+PHYSICS:
+Use this format when appropriate:
+
+Given:
+Required:
+Formula:
+Substitution:
+Calculation:
+Answer:
+
+If the user asks:
+"ဒီအဆင့်ကို ဘာလို့လုပ်တာလဲ?"
+or
+"ဒီ 2 က ဘယ်ကရတာလဲ?"
+explain that exact step simply.
+
+If the user asks for another method:
+- Solve using another valid method.
+
+If several questions are visible:
+- If the user clearly says which question, solve that question.
+- If it is genuinely unclear which question they want, ask for the question number.
+
+If the image is genuinely too blurry to read:
+- Say that the image is unclear.
+- Ask for a clearer photo.
+
+At the end of a normal solution:
+"နားလည်သွားပြီလား? 😊"
+"""
 
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS context (
-            user_id INTEGER PRIMARY KEY,
-            messages TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-init_db()
-
-
-# =========================
-# TELEGRAM
-# =========================
+# =========================================================
+# TELEGRAM FUNCTIONS
+# =========================================================
 
 def send_message(chat_id, text):
+
     try:
+
         response = requests.post(
             f"{TELEGRAM_API}/sendMessage",
             json={
@@ -64,6 +97,7 @@ def send_message(chat_id, text):
         )
 
         if not response.ok:
+
             print(
                 "Telegram send error:",
                 response.status_code,
@@ -71,6 +105,7 @@ def send_message(chat_id, text):
             )
 
     except Exception as e:
+
         print(
             "Telegram send exception:",
             type(e).__name__,
@@ -98,7 +133,7 @@ def get_updates(offset=None):
     return response.json()
 
 
-def get_file(file_id):
+def get_telegram_file(file_id):
 
     response = requests.get(
         f"{TELEGRAM_API}/getFile",
@@ -113,8 +148,9 @@ def get_file(file_id):
     data = response.json()
 
     if not data.get("ok"):
+
         raise Exception(
-            "Telegram file error: "
+            "Telegram getFile error: "
             + str(data)
         )
 
@@ -123,8 +159,13 @@ def get_file(file_id):
 
 def download_telegram_file(file_path):
 
+    url = (
+        f"https://api.telegram.org/"
+        f"file/bot{BOT_TOKEN}/{file_path}"
+    )
+
     response = requests.get(
-        f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
+        url,
         timeout=60
     )
 
@@ -133,59 +174,14 @@ def download_telegram_file(file_path):
     return response.content
 
 
-# =========================
-# OPENAI
-# =========================
+# =========================================================
+# OPENAI FUNCTIONS
+# =========================================================
 
-SYSTEM_PROMPT = """
-You are a Math and Physics AI Tutor for a Myanmar student.
-
-Always explain in simple Burmese.
-
-For Math:
-- Read the question carefully.
-- Show the calculation step by step.
-- Explain important steps clearly.
-- Do not skip important algebra steps.
-- Give the final answer clearly.
-
-For Physics use exactly this structure when appropriate:
-
-Given:
-Required:
-Formula:
-Substitution:
-Calculation:
-Answer:
-
-If the student asks:
-"ဘာလို့ဒီအဆင့်လုပ်တာလဲ?"
-or
-"ဒီ 2 က ဘယ်ကရတာလဲ?"
-explain that specific step simply.
-
-If the student asks for another method:
-- Solve using another valid method.
-
-If the image is unclear:
-- Do not guess.
-- Ask the student to send a clearer photo.
-
-If multiple questions are shown and it is unclear which one:
-- Ask which question number they want.
-
-Use simple Burmese suitable for a high-school student.
-
-At the end of a normal solution, ask:
-
-နားလည်သွားပြီလား? 😊
-"""
-
-
-def extract_openai_text(data):
+def extract_openai_answer(data):
 
     """
-    Read text from the raw Responses API JSON.
+    Extract text from the raw Responses API JSON.
     """
 
     output = data.get("output", [])
@@ -201,7 +197,7 @@ def extract_openai_text(data):
 
             if content_item.get("type") == "output_text":
 
-                text = content_item.get("text", "")
+                text = content_item.get("text")
 
                 if text:
                     return text
@@ -212,9 +208,16 @@ def extract_openai_text(data):
 def ask_openai(text=None, image_bytes=None):
 
     if not OPENAI_API_KEY:
-        raise Exception("OPENAI_API_KEY is missing")
+
+        raise Exception(
+            "OPENAI_API_KEY is missing"
+        )
 
     content = []
+
+    # -----------------------------------------------------
+    # TEXT
+    # -----------------------------------------------------
 
     if text:
 
@@ -223,6 +226,10 @@ def ask_openai(text=None, image_bytes=None):
             "text": text
         })
 
+    # -----------------------------------------------------
+    # IMAGE
+    # -----------------------------------------------------
+
     if image_bytes:
 
         encoded = base64.b64encode(
@@ -230,12 +237,25 @@ def ask_openai(text=None, image_bytes=None):
         ).decode("utf-8")
 
         content.append({
+
             "type": "input_image",
-            "image_url": (
+
+            "image_url":
                 "data:image/jpeg;base64,"
-                + encoded
-            )
+                + encoded,
+
+            "detail": "high"
         })
+
+    if not content:
+
+        raise Exception(
+            "No text or image was provided"
+        )
+
+    # -----------------------------------------------------
+    # REQUEST
+    # -----------------------------------------------------
 
     payload = {
 
@@ -292,262 +312,68 @@ def ask_openai(text=None, image_bytes=None):
         response.status_code
     )
 
+    # -----------------------------------------------------
+    # API ERROR
+    # -----------------------------------------------------
+
     if not response.ok:
 
         print(
-            "OpenAI error:",
+            "OpenAI API error:",
+            response.status_code
+        )
+
+        print(
             response.text
         )
 
         raise Exception(
-            "OpenAI API error"
+            "OpenAI API request failed"
         )
+
+    # -----------------------------------------------------
+    # JSON
+    # -----------------------------------------------------
 
     data = response.json()
 
-    answer = extract_openai_text(data)
+    answer = extract_openai_answer(
+        data
+    )
 
     if answer:
 
         return answer
 
+    # -----------------------------------------------------
+    # NO TEXT FOUND
+    # -----------------------------------------------------
+
     print(
-        "OpenAI response did not contain text:",
-        data
+        "OpenAI returned no output text."
     )
 
-    return "အဖြေမရသေးပါ။"
+    print(
+        "Response keys:",
+        list(data.keys())
+    )
+
+    return (
+        "AI က အဖြေစာသား ပြန်မရသေးပါ။ "
+        "ခဏနေပြီး ထပ်စမ်းကြည့်ပါ။"
+    )
 
 
-# =========================
+# =========================================================
 # MESSAGE HANDLER
-# =========================
+# =========================================================
 
 def handle_message(message):
 
     chat_id = message["chat"]["id"]
 
-    # =====================
-    # START
-    # =====================
-
-    if message.get("text") == "/start":
-
-        send_message(
-
-            chat_id,
-
-            "မင်္ဂလာပါ 👋\n\n"
-            "ကျွန်တော်က Math + Physics AI Tutor ပါ။\n\n"
-            "📷 Math / Physics မေးခွန်းပုံ ပို့နိုင်ပါတယ်။\n"
-            "✍️ မေးခွန်းကို စာနဲ့လည်း ရိုက်ပို့နိုင်ပါတယ်။\n\n"
-            "အဆင့်လိုက် မြန်မာလို ရှင်းပြပေးပါမယ်။ 😊"
-
-        )
-
-        return
-
-    try:
-
-        # =====================
-        # PHOTO
-        # =====================
-
-        if "photo" in message:
-
-            photos = message["photo"]
-
-            photo = photos[-1]
-
-            file_id = photo["file_id"]
-
-            file_path = get_file(
-                file_id
-            )
-
-            image_bytes = download_telegram_file(
-                file_path
-            )
-
-            send_message(
-                chat_id,
-                "မေးခွန်းကို ဖတ်ပြီး တွက်ပေးနေပါတယ်... ⏳"
-            )
-
-            answer = ask_openai(
-                image_bytes=image_bytes
-            )
-
-            send_message(
-                chat_id,
-                answer
-            )
-
-            return
-
-        # =====================
-        # TEXT
-        # =====================
-
-        if "text" in message:
-
-            text = message["text"].strip()
-
-            if not text:
-                return
-
-            answer = ask_openai(
-                text=text
-            )
-
-            send_message(
-                chat_id,
-                answer
-            )
-
-            return
-
-    except Exception as e:
-
-        print(
-            "Handler error:",
-            type(e).__name__,
-            str(e)
-        )
-
-        send_message(
-
-            chat_id,
-
-            "တစ်ခုခုအမှားဖြစ်သွားပါတယ်။\n"
-            "ခဏနေပြီး ပြန်စမ်းကြည့်ပါ။"
-
-        )
-
-
-# =========================
-# BOT LOOP
-# =========================
-
-def bot_loop():
-
-    print("Bot started.")
-
-    offset = None
-
-    while True:
-
-        try:
-
-            result = get_updates(
-                offset
-            )
-
-            if not result.get("ok"):
-
-                print(
-                    "Telegram API error:",
-                    result
-                )
-
-                time.sleep(5)
-
-                continue
-
-            updates = result.get(
-                "result",
-                []
-            )
-
-            for update in updates:
-
-                offset = (
-                    update["update_id"]
-                    + 1
-                )
-
-                if "message" in update:
-
-                    handle_message(
-                        update["message"]
-                    )
-
-        except Exception as e:
-
-            print(
-                "Bot loop error:",
-                type(e).__name__,
-                str(e)
-            )
-
-            time.sleep(5)
-
-
-# =========================
-# RENDER HEALTH CHECK
-# =========================
-
-@app.route("/")
-def home():
-
-    return "Math Physics AI Tutor is running."
-
-
-@app.route("/health")
-def health():
-
-    return "OK"
-
-
-@app.route("/api/healthz")
-def healthz():
-
-    return jsonify({
-
-        "status": "ok",
-
-        "bot": "running"
-
-    })
-
-
-# =========================
-# START
-# =========================
-
-if __name__ == "__main__":
-
-    if not BOT_TOKEN:
-
-        print(
-            "ERROR: BOT_TOKEN is missing"
-        )
-
-    if not OPENAI_API_KEY:
-
-        print(
-            "ERROR: OPENAI_API_KEY is missing"
-        )
-
-    thread = threading.Thread(
-
-        target=bot_loop,
-
-        daemon=True
-    )
-
-    thread.start()
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    app.run(
-
-        host="0.0.0.0",
-
-        port=port
-    )
+    # =====================================================
+    # /start
+    # =====================================================
+
+    if message.get("
