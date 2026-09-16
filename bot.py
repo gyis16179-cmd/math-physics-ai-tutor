@@ -31,27 +31,20 @@ app = Flask(__name__)
 
 def get_font(size=34, bold=False):
 
-    possible_fonts = []
-
     if bold:
-        possible_fonts = [
+        fonts = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
         ]
     else:
-        possible_fonts = [
+        fonts = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
         ]
 
-    for path in possible_fonts:
-
+    for path in fonts:
         if os.path.exists(path):
-
-            return ImageFont.truetype(
-                path,
-                size
-            )
+            return ImageFont.truetype(path, size)
 
     return ImageFont.load_default()
 
@@ -67,24 +60,20 @@ The student may send a photo of a Math or Physics question.
 
 IMPORTANT:
 - Carefully read the image.
-- Solve the actual question in the image.
-- Never pretend the image is missing when it is readable.
-- Never invent unreadable numbers.
-- If genuinely unreadable, ask for a clearer photo.
-
-LANGUAGE:
+- Solve the actual question shown in the image.
+- Never guess numbers or symbols.
+- If the image is genuinely unreadable, ask for a clearer photo.
 - Explain in simple Burmese.
-- Keep the calculation clear and easy to copy into a notebook.
+- Keep the calculation easy to copy into a notebook.
 
 MATH:
 - Solve step by step.
-- Show every important calculation.
-- Make fractions and algebra easy to follow.
-- Do not skip important steps.
+- Show important calculations.
+- Do not skip important algebra steps.
 - Give the final answer.
 
 PHYSICS:
-Use:
+Use this format:
 
 Given:
 Required:
@@ -93,39 +82,26 @@ Substitution:
 Calculation:
 Answer:
 
-VERY IMPORTANT OUTPUT FORMAT:
-
+VERY IMPORTANT:
 Return ONLY the solution.
+
 Do NOT use Markdown.
 Do NOT use LaTeX.
 Do NOT use $ signs.
-Do NOT use \[ \].
+Do NOT use \\[ \\].
 Do NOT use ```.
 
-Use simple lines like:
+Use simple text.
 
-မေးခွန်း
-...
+Example:
 
 ဖြေရှင်းချက်
 
-1)
-...
-
-2)
-...
-
-3)
-...
+1) ...
+2) ...
+3) ...
 
 အဖြေ = ...
-
-For fractions, write them clearly using lines when possible.
-Example:
-
-    1
-  ─────
-   3+√3
 
 For Physics:
 
@@ -149,45 +125,32 @@ v = 20 m/s
 Answer:
 20 m/s
 
-Do not add unnecessary explanations.
-
 At the end write:
 နားလည်သွားပြီလား? 😊
 """
 
 
 # =========================================================
-# OPENAI TEXT EXTRACTION
+# EXTRACT AI ANSWER
 # =========================================================
 
 def extract_answer(data):
 
-    output = data.get(
-        "output",
-        []
-    )
+    if data.get("output_text"):
+        return data["output_text"].strip()
 
-    for item in output:
+    for item in data.get("output", []):
 
         if item.get("type") != "message":
             continue
 
-        content = item.get(
-            "content",
-            []
-        )
-
-        for part in content:
+        for part in item.get("content", []):
 
             if part.get("type") == "output_text":
 
-                text = part.get(
-                    "text",
-                    ""
-                )
+                text = part.get("text", "")
 
                 if text:
-
                     return text.strip()
 
     return None
@@ -197,31 +160,20 @@ def extract_answer(data):
 # ASK OPENAI
 # =========================================================
 
-def ask_openai(
-    text=None,
-    image_bytes=None
-):
+def ask_openai(text=None, image_bytes=None):
 
     if not OPENAI_API_KEY:
-
-        raise Exception(
-            "OPENAI_API_KEY is missing"
-        )
+        raise Exception("OPENAI_API_KEY is missing")
 
     content = []
 
-    # TEXT
     if text:
 
         content.append({
-
             "type": "input_text",
-
             "text": text
-
         })
 
-    # IMAGE
     if image_bytes:
 
         encoded = base64.b64encode(
@@ -229,96 +181,57 @@ def ask_openai(
         ).decode("utf-8")
 
         content.append({
-
             "type": "input_image",
-
-            "image_url":
-                "data:image/jpeg;base64,"
-                + encoded,
-
+            "image_url": "data:image/jpeg;base64," + encoded,
             "detail": "high"
-
         })
 
     if not content:
-
-        raise Exception(
-            "No input"
-        )
+        raise Exception("No input")
 
     payload = {
-
         "model": MODEL,
 
         "input": [
 
             {
-
                 "role": "system",
 
                 "content": [
-
                     {
-
                         "type": "input_text",
-
                         "text": SYSTEM_PROMPT
-
                     }
-
                 ]
-
             },
 
             {
-
                 "role": "user",
-
                 "content": content
-
             }
-
         ]
-
     }
 
     headers = {
-
-        "Authorization":
-            f"Bearer {OPENAI_API_KEY}",
-
-        "Content-Type":
-            "application/json"
-
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
     }
 
-    print(
-        "Sending request to OpenAI..."
-    )
+    print("Sending request to OpenAI...")
 
     response = requests.post(
-
         OPENAI_API,
-
         headers=headers,
-
         json=payload,
-
         timeout=120
-
     )
 
-    print(
-        "OpenAI status:",
-        response.status_code
-    )
+    print("OpenAI status:", response.status_code)
 
     if not response.ok:
 
-        print(
-            "OpenAI error:",
-            response.text
-        )
+        print("OpenAI error:")
+        print(response.text)
 
         raise Exception(
             "OpenAI API error"
@@ -326,24 +239,18 @@ def ask_openai(
 
     data = response.json()
 
-    answer = extract_answer(
-        data
-    )
+    answer = extract_answer(data)
 
     if not answer:
 
-        print(
-            "No answer in response:",
-            data
-        )
+        print("No answer returned:")
+        print(data)
 
         raise Exception(
             "No text returned"
         )
 
-    print(
-        "AI answer received."
-    )
+    print("AI answer received.")
 
     return answer
 
@@ -352,13 +259,7 @@ def ask_openai(
 # CREATE NOTEBOOK IMAGE
 # =========================================================
 
-def create_solution_image(
-    solution
-):
-
-    # -----------------------------------------------------
-    # Image settings
-    # -----------------------------------------------------
+def create_solution_image(solution):
 
     width = 1400
     padding = 70
@@ -372,15 +273,6 @@ def create_solution_image(
         42,
         True
     )
-
-    small_font = get_font(
-        28,
-        False
-    )
-
-    # -----------------------------------------------------
-    # Clean text
-    # -----------------------------------------------------
 
     solution = solution.replace(
         "```",
@@ -399,7 +291,6 @@ def create_solution_image(
 
             continue
 
-        # Wrap very long lines
         wrapped = textwrap.wrap(
             line,
             width=48,
@@ -408,10 +299,7 @@ def create_solution_image(
         )
 
         if wrapped:
-
-            lines.extend(
-                wrapped
-            )
+            lines.extend(wrapped)
 
     if not lines:
 
@@ -419,21 +307,12 @@ def create_solution_image(
             "အဖြေ မရသေးပါ။"
         ]
 
-    # -----------------------------------------------------
-    # Calculate height
-    # -----------------------------------------------------
-
     line_height = 55
 
     height = max(
         1000,
-        padding * 2
-        + len(lines) * line_height
+        padding * 2 + len(lines) * line_height
     )
-
-    # -----------------------------------------------------
-    # Create white paper
-    # -----------------------------------------------------
 
     image = Image.new(
         "RGB",
@@ -445,14 +324,9 @@ def create_solution_image(
         image
     )
 
-    # -----------------------------------------------------
     # Notebook lines
-    # -----------------------------------------------------
-
-    notebook_start = 145
-
     for y in range(
-        notebook_start,
+        145,
         height,
         55
     ):
@@ -476,10 +350,7 @@ def create_solution_image(
         width=2
     )
 
-    # -----------------------------------------------------
     # Header
-    # -----------------------------------------------------
-
     draw.text(
         (150, 45),
         "Math + Physics AI Tutor",
@@ -487,15 +358,11 @@ def create_solution_image(
         fill=(30, 30, 30)
     )
 
-    # -----------------------------------------------------
-    # Solution text
-    # -----------------------------------------------------
-
+    # Solution
     y = 145
 
     for line in lines:
 
-        # Make headings larger
         if (
             line.startswith("Given:")
             or line.startswith("Required:")
@@ -522,10 +389,6 @@ def create_solution_image(
 
         y += line_height
 
-    # -----------------------------------------------------
-    # Crop unnecessary bottom space
-    # -----------------------------------------------------
-
     final_height = min(
         height,
         y + 100
@@ -540,10 +403,6 @@ def create_solution_image(
         )
     )
 
-    # -----------------------------------------------------
-    # Convert to bytes
-    # -----------------------------------------------------
-
     output = io.BytesIO()
 
     image.save(
@@ -557,30 +416,22 @@ def create_solution_image(
 
 
 # =========================================================
-# TELEGRAM SEND TEXT
+# TELEGRAM SEND MESSAGE
 # =========================================================
 
-def send_message(
-    chat_id,
-    text
-):
+def send_message(chat_id, text):
 
     try:
 
         response = requests.post(
-
             f"{TELEGRAM_API}/sendMessage",
 
             json={
-
                 "chat_id": chat_id,
-
                 "text": text
-
             },
 
             timeout=30
-
         )
 
         if not response.ok:
@@ -594,7 +445,7 @@ def send_message(
 
         print(
             "Telegram send error:",
-            e
+            repr(e)
         )
 
 
@@ -611,35 +462,25 @@ def send_photo(
     try:
 
         files = {
-
             "photo": (
                 "solution.png",
                 image_bytes,
                 "image/png"
             )
-
         }
 
         data = {
-
-            "chat_id":
-                str(chat_id),
-
-            "caption":
-                caption
-
+            "chat_id": str(chat_id),
+            "caption": caption
         }
 
         response = requests.post(
-
             f"{TELEGRAM_API}/sendPhoto",
 
             files=files,
-
             data=data,
 
             timeout=60
-
         )
 
         if not response.ok:
@@ -653,7 +494,7 @@ def send_photo(
 
         print(
             "Telegram photo error:",
-            e
+            repr(e)
         )
 
 
@@ -661,28 +502,19 @@ def send_photo(
 # TELEGRAM GET UPDATES
 # =========================================================
 
-def get_updates(
-    offset=None
-):
+def get_updates(offset=None):
 
     params = {
-
         "timeout": 30
-
     }
 
     if offset is not None:
-
         params["offset"] = offset
 
     response = requests.get(
-
         f"{TELEGRAM_API}/getUpdates",
-
         params=params,
-
         timeout=40
-
     )
 
     response.raise_for_status()
@@ -694,22 +526,16 @@ def get_updates(
 # TELEGRAM FILE
 # =========================================================
 
-def get_file(
-    file_id
-):
+def get_file(file_id):
 
     response = requests.get(
-
         f"{TELEGRAM_API}/getFile",
 
         params={
-
             "file_id": file_id
-
         },
 
         timeout=30
-
     )
 
     response.raise_for_status()
@@ -717,7 +543,6 @@ def get_file(
     data = response.json()
 
     if not data.get("ok"):
-
         raise Exception(
             "Telegram file error"
         )
@@ -725,17 +550,11 @@ def get_file(
     return data["result"]["file_path"]
 
 
-def download_file(
-    file_path
-):
+def download_file(file_path):
 
     response = requests.get(
-
-        f"https://api.telegram.org/file/bot"
-        f"{BOT_TOKEN}/{file_path}",
-
+        f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
         timeout=60
-
     )
 
     response.raise_for_status()
@@ -744,38 +563,28 @@ def download_file(
 
 
 # =========================================================
-# MESSAGE HANDLER
+# HANDLE MESSAGE
 # =========================================================
 
-def handle_message(
-    message
-):
+def handle_message(message):
 
-    chat_id = message[
-        "chat"
-    ][
-        "id"
-    ]
+    chat_id = message["chat"]["id"]
 
     # -----------------------------------------------------
     # START
     # -----------------------------------------------------
 
-    if message.get(
-        "text"
-    ) == "/start":
+    if message.get("text") == "/start":
 
         send_message(
-
             chat_id,
 
             "မင်္ဂလာပါ 👋\n\n"
             "📐 Math မေးခွန်းပုံ ပို့ပါ။\n"
             "⚡ Physics မေးခွန်းပုံ ပို့ပါ။\n\n"
             "AI ကတွက်ပြီး\n"
-            "စာရွက်ပေါ်မှာတွက်ထားသလို "
+            "စာရွက်ပေါ်တွက်ထားသလို\n"
             "ပုံအဖြစ် ပြန်ပို့ပေးပါမယ်။ ✍️📄"
-
         )
 
         return
@@ -788,21 +597,13 @@ def handle_message(
 
         if "photo" in message:
 
-            photos = message[
-                "photo"
-            ]
+            photos = message["photo"]
 
-            photo = photos[
-                -1
-            ]
+            photo = photos[-1]
 
-            file_id = photo[
-                "file_id"
-            ]
+            file_id = photo["file_id"]
 
-            print(
-                "Photo received."
-            )
+            print("Photo received.")
 
             file_path = get_file(
                 file_id
@@ -819,36 +620,103 @@ def handle_message(
             )
 
             send_message(
-
                 chat_id,
 
                 "မေးခွန်းကို ဖတ်ပြီး "
                 "စာရွက်ပေါ်တွက်ထားသလို "
                 "လုပ်ပေးနေပါတယ်... ✍️⏳"
-
             )
 
-            # AI solve
             answer = ask_openai(
-
                 image_bytes=image_bytes
-
             )
 
             print(
                 "Creating solution image..."
             )
 
-            # Convert answer to image
             solution_image = create_solution_image(
                 answer
             )
 
-            # Send image
             send_photo(
-
                 chat_id,
-
                 solution_image,
+                "📐 Math / ⚡ Physics ဖြေရှင်းချက်"
+            )
 
-                "📐 Math / ⚡ Physics ဖြေရှင်းချက်
+            return
+
+        # =================================================
+        # TEXT
+        # =================================================
+
+        if "text" in message:
+
+            user_text = message["text"].strip()
+
+            if not user_text:
+                return
+
+            send_message(
+                chat_id,
+                "မေးခွန်းကို တွက်ပေးနေပါတယ်... ⏳"
+            )
+
+            answer = ask_openai(
+                text=user_text
+            )
+
+            solution_image = create_solution_image(
+                answer
+            )
+
+            send_photo(
+                chat_id,
+                solution_image,
+                "📐 Math / ⚡ Physics ဖြေရှင်းချက်"
+            )
+
+            return
+
+    except Exception as e:
+
+        print(
+            "HANDLE MESSAGE ERROR:",
+            repr(e)
+        )
+
+        send_message(
+            chat_id,
+
+            "တောင်းပန်ပါတယ်။ "
+            "Error တစ်ခုဖြစ်သွားပါတယ်။ "
+            "ခဏနေပြန်စမ်းပေးပါ။"
+        )
+
+
+# =========================================================
+# BOT LOOP
+# =========================================================
+
+def bot_loop():
+
+    offset = None
+
+    print("Bot started.")
+
+    while True:
+
+        try:
+
+            data = get_updates(
+                offset=offset
+            )
+
+            if not data.get("ok"):
+
+                time.sleep(3)
+
+                continue
+
+            updates = data
