@@ -1,207 +1,126 @@
 import os
 import time
-import threading
+import base64
 import sqlite3
-from datetime import datetime, timezone
-
+import threading
 import requests
+
 from flask import Flask, jsonify
-from google import genai
-from google.genai import types
 
-
-# ============================================================
+# =========================
 # SETTINGS
-# ============================================================
+# =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not configured.")
-
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is not configured.")
+MODEL = "gpt-5.6-luna"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
-
-MODEL = "gemini-2.5-flash-lite"
-PORT = int(os.getenv("PORT", "10000"))
-
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-
-# ============================================================
-# WEB SERVER
-# ============================================================
+OPENAI_API = "https://api.openai.com/v1/responses"
 
 app = Flask(__name__)
 
-
-@app.get("/")
-def home():
-    return "Math + Physics AI Tutor is running."
-
-
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-@app.get("/api/healthz")
-def healthz():
-    return jsonify({"status": "ok"})
-
-
-# ============================================================
+# =========================
 # DATABASE
-# ============================================================
+# =========================
 
 DB_FILE = "tutor.db"
-db_lock = threading.Lock()
-
-db = sqlite3.connect(
-    DB_FILE,
-    check_same_thread=False
-)
-
-db.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    context TEXT DEFAULT ''
-)
-""")
-
-db.commit()
 
 
-def get_context(user_id):
-    with db_lock:
-        row = db.execute(
-            "SELECT context FROM users WHERE user_id = ?",
-            (user_id,)
-        ).fetchone()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
 
-        if row:
-            return row[0] or ""
-
-        db.execute(
-            "INSERT INTO users (user_id, context) VALUES (?, ?)",
-            (user_id, "")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS context (
+            user_id INTEGER PRIMARY KEY,
+            messages TEXT
         )
+    """)
 
-        db.commit()
-
-        return ""
-
-
-def save_context(user_id, context):
-    # Prevent context from growing forever.
-    context = context[-16000:]
-
-    with db_lock:
-        db.execute(
-            """
-            INSERT INTO users (user_id, context)
-            VALUES (?, ?)
-            ON CONFLICT(user_id)
-            DO UPDATE SET context = excluded.context
-            """,
-            (user_id, context)
-        )
-
-        db.commit()
+    conn.commit()
+    conn.close()
 
 
-def clear_context(user_id):
-    with db_lock:
-        db.execute(
-            "DELETE FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-
-        db.commit()
+init_db()
 
 
-# ============================================================
-# TELEGRAM API
-# ============================================================
-
-def telegram_request(method, data=None, timeout=60):
-    response = requests.post(
-        f"{TELEGRAM_API}/{method}",
-        data=data or {},
-        timeout=timeout
-    )
-
-    response.raise_for_status()
-
-    result = response.json()
-
-    if not result.get("ok"):
-        raise RuntimeError(
-            result.get("description", "Telegram API error")
-        )
-
-    return result.get("result")
-
+# =========================
+# TELEGRAM
+# =========================
 
 def send_message(chat_id, text):
-    # Telegram has a message length limit.
-    max_length = 4000
-
-    if not text:
-        return
-
-    for start in range(0, len(text), max_length):
-        telegram_request(
-            "sendMessage",
-            {
+    try:
+        requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={
                 "chat_id": chat_id,
-                "text": text[start:start + max_length]
+                "text": text
             },
             timeout=30
         )
+    except Exception as e:
+        print("Telegram send error:", type(e).__name__, str(e))
 
 
-def send_typing(chat_id):
-    try:
-        telegram_request(
-            "sendChatAction",
-            {
-                "chat_id": chat_id,
-                "action": "typing"
-            },
-            timeout=15
-        )
-    except Exception:
-        pass
+def get_updates(offset=None):
+    params = {
+        "timeout": 30
+    }
+
+    if offset is not None:
+        params["offset"] = offset
+
+    response = requests.get(
+        f"{TELEGRAM_API}/getUpdates",
+        params=params,
+        timeout=40
+    )
+
+    return response.json()
 
 
-# ============================================================
-# GEMINI INSTRUCTIONS
-# ============================================================
+def get_file(file_id):
+    response = requests.get(
+        f"{TELEGRAM_API}/getFile",
+        params={"file_id": file_id},
+        timeout=30
+    )
+
+    data = response.json()
+
+    if not data.get("ok"):
+        raise Exception("Telegram file error")
+
+    return data["result"]["file_path"]
+
+
+def download_telegram_file(file_path):
+    response = requests.get(
+        f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
+        timeout=60
+    )
+
+    response.raise_for_status()
+    return response.content
+
+
+# =========================
+# OPENAI
+# =========================
 
 SYSTEM_PROMPT = """
 You are a Math and Physics AI Tutor for a Myanmar student.
 
-Always answer in simple, natural Burmese.
+Always explain in simple Burmese.
 
-Your main job is to:
-- Read Math and Physics questions.
-- Solve them accurately.
-- Explain them step by step.
-- Use easy methods suitable for a school student.
-- Explain WHY important steps are performed.
-- Check calculations before giving the final answer.
+For Math:
+- Show the calculation step by step.
+- Explain why each important step is done.
+- Do not skip important algebra steps.
 
-MATH:
-Show the important algebra and calculation steps clearly.
-
-PHYSICS:
-Use this structure when appropriate:
-
+For Physics use:
 Given:
 Required:
 Formula:
@@ -209,419 +128,217 @@ Substitution:
 Calculation:
 Answer:
 
-IMAGE QUESTIONS:
-Carefully read all visible numbers, symbols, units and words.
-Never guess a number or symbol that cannot be read.
-If the image is genuinely unclear, ask for a clearer/full image.
+If the student asks why a step was done, explain only that step simply.
 
-If multiple questions are visible and it is unclear which one the student wants,
-ask which question they want.
+If the student asks for another method, solve using another valid method.
 
-FOLLOW-UP:
-Remember the current problem and understand questions such as:
-"ဒီအဆင့်ကို ဘာလို့လုပ်တာလဲ?"
-"ဒီ 2 က ဘယ်ကရတာလဲ?"
-"အဖြေက ဘယ်လောက်လဲ?"
-"နောက်တစ်နည်းနဲ့တွက်ပြ"
+If the image is unclear or the question cannot be read:
+- Do not guess.
+- Ask the student to send a clearer photo.
 
-If the student says they do not understand:
-Explain the difficult part again using smaller steps and simple Burmese.
+If multiple questions are shown and it is unclear which one to solve:
+- Ask which question number they want.
 
-If the student asks for another method:
-Solve the same problem using another valid method.
-
-After solving a problem, normally ask:
+At the end of a normal solution, ask:
 "နားလည်သွားပြီလား? 😊"
 """
 
 
-# ============================================================
-# TEXT QUESTION
-# ============================================================
+def ask_openai(text=None, image_bytes=None):
+    content = []
 
-def solve_text(user_id, text):
-    previous_context = get_context(user_id)
+    if text:
+        content.append({
+            "type": "input_text",
+            "text": text
+        })
 
-    prompt = SYSTEM_PROMPT
+    if image_bytes:
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
 
-    if previous_context:
-        prompt += """
+        content.append({
+            "type": "input_image",
+            "image_url": f"data:image/jpeg;base64,{encoded}"
+        })
 
-Previous conversation:
---------------------
-""" + previous_context + """
---------------------
-"""
-
-    prompt += """
-
-Student's new message:
-""" + text
-
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt
-    )
-
-    answer = getattr(response, "text", None)
-
-    if not answer:
-        raise RuntimeError("Gemini returned an empty response.")
-
-    updated_context = (
-        previous_context
-        + "\nStudent: "
-        + text
-        + "\nTutor: "
-        + answer
-    )
-
-    save_context(user_id, updated_context)
-
-    return answer
-
-
-# ============================================================
-# TELEGRAM PHOTO DOWNLOAD
-# ============================================================
-
-def download_photo(photo):
-    file_info = telegram_request(
-        "getFile",
-        {
-            "file_id": photo["file_id"]
-        },
-        timeout=30
-    )
-
-    file_path = file_info.get("file_path")
-
-    if not file_path:
-        raise RuntimeError("Telegram file path is missing.")
-
-    response = requests.get(
-        f"{TELEGRAM_FILE_API}/{file_path}",
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    if not response.content:
-        raise RuntimeError("Image download returned empty data.")
-
-    return response.content
-
-
-def get_best_photo(photo_list):
-    if not photo_list:
-        return None
-
-    # Telegram normally gives photo sizes from smallest to largest.
-    return photo_list[-1]
-
-
-# ============================================================
-# IMAGE QUESTION
-# ============================================================
-
-def solve_image(user_id, image_bytes, caption=""):
-    previous_context = get_context(user_id)
-
-    image_part = types.Part.from_bytes(
-        data=image_bytes,
-        mime_type="image/jpeg"
-    )
-
-    prompt = SYSTEM_PROMPT + """
-
-The student has sent an image of a Math or Physics problem.
-
-Read the image carefully.
-
-First understand the exact question.
-Then solve it.
-
-Do not guess unclear mathematical symbols, numbers, units or words.
-If something essential cannot be read, clearly tell the student what is unclear.
-
-"""
-
-    if caption:
-        prompt += """
-
-The student also wrote this caption:
-""" + caption
-
-    if previous_context:
-        prompt += """
-
-Previous conversation context:
---------------------
-""" + previous_context + """
---------------------
-"""
-
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            image_part,
-            prompt
+    payload = {
+        "model": MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": SYSTEM_PROMPT
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": content
+            }
         ]
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(
+        OPENAI_API,
+        headers=headers,
+        json=payload,
+        timeout=120
     )
 
-    answer = getattr(response, "text", None)
+    if not response.ok:
+        print("OpenAI error:", response.status_code, response.text)
+        raise Exception("OpenAI API error")
 
-    if not answer:
-        raise RuntimeError("Gemini returned an empty image response.")
+    data = response.json()
 
-    updated_context = (
-        previous_context
-        + "\nStudent sent a Math/Physics image."
-        + ("\nCaption: " + caption if caption else "")
-        + "\nTutor: "
-        + answer
-    )
-
-    save_context(user_id, updated_context)
-
-    return answer
+    return data.get("output_text", "အဖြေမရသေးပါ။")
 
 
-# ============================================================
-# /START
-# ============================================================
+# =========================
+# MESSAGE HANDLER
+# =========================
 
-def handle_start(chat_id, user_id):
-    clear_context(user_id)
+def handle_message(message):
+    chat_id = message["chat"]["id"]
 
-    message = """မင်္ဂလာပါ 👋
-
-ကျွန်တော်က Math နဲ့ Physics ပုစ္ဆာတွေကို ကူညီဖြေရှင်းပေးမယ့် AI Tutor ပါ။ 🧮📚
-
-မသိတဲ့ပုစ္ဆာရှိရင် ပုံရိုက်ပြီး ပို့လိုက်ပါ။
-ပုံထဲက ပုစ္ဆာကို ဖတ်ပြီး အဆင့်လိုက်၊ နားလည်လွယ်အောင် မြန်မာလို ရှင်းပြပြီး တွက်ပေးပါမယ်။ 😊
-
-စာနဲ့ရိုက်ပြီး မေးလည်း ရပါတယ်။
-
-📷 ပုံနဲ့ပုစ္ဆာ မေးနိုင်ပါတယ်။
-📝 စာနဲ့လည်း မေးနိုင်ပါတယ်။"""
-
-    send_message(chat_id, message)
-
-
-# ============================================================
-# TEXT HANDLER
-# ============================================================
-
-def handle_text(chat_id, user_id, text):
-    send_typing(chat_id)
+    # /start
+    if message.get("text") == "/start":
+        send_message(
+            chat_id,
+            "မင်္ဂလာပါ 👋\n\n"
+            "ကျွန်တော်က Math + Physics AI Tutor ပါ။\n\n"
+            "📷 Math / Physics မေးခွန်းပုံ ပို့နိုင်ပါတယ်။\n"
+            "✍️ မေးခွန်းကို စာနဲ့လည်း ရိုက်ပို့နိုင်ပါတယ်။\n\n"
+            "အဆင့်လိုက် မြန်မာလို ရှင်းပြပေးပါမယ်။ 😊"
+        )
+        return
 
     try:
-        answer = solve_text(
-            user_id,
-            text
-        )
+        # PHOTO
+        if "photo" in message:
+            photos = message["photo"]
 
-        send_message(
-            chat_id,
-            answer
-        )
+            # Highest resolution photo
+            photo = photos[-1]
 
-    except Exception as error:
-        print(
-            "Text solving error:",
-            type(error).__name__,
-            str(error)
-        )
+            file_id = photo["file_id"]
 
-        send_message(
-            chat_id,
-            "AI Tutor ကို ခဏချိတ်ဆက်မရသေးပါဘူး။ ခဏနေရင် ပြန်မေးပေးပါနော်။ 🙏"
-        )
+            file_path = get_file(file_id)
+            image_bytes = download_telegram_file(file_path)
 
+            send_message(chat_id, "မေးခွန်းကို ဖတ်ပြီး တွက်ပေးနေပါတယ်... ⏳")
 
-# ============================================================
-# PHOTO HANDLER
-# ============================================================
-
-def handle_photo(chat_id, user_id, message):
-    photo = get_best_photo(
-        message.get("photo", [])
-    )
-
-    if not photo:
-        send_message(
-            chat_id,
-            "ပုံကို မရရှိသေးပါဘူး။ ပြန်ပို့ပေးပါနော်။ 🙏"
-        )
-        return
-
-    send_typing(chat_id)
-
-    try:
-        image_bytes = download_photo(photo)
-
-        caption = (
-            message.get("caption", "").strip()
-        )
-
-        answer = solve_image(
-            user_id,
-            image_bytes,
-            caption
-        )
-
-        send_message(
-            chat_id,
-            answer
-        )
-
-    except Exception as error:
-        print(
-            "Image solving error:",
-            type(error).__name__,
-            str(error)
-        )
-
-        send_message(
-            chat_id,
-            """ပုံကိုဖတ်ပြီး ဖြေရှင်းရာမှာ အခက်အခဲဖြစ်နေပါတယ်။ 🙏
-
-ပုံက ရှင်းပြီး ပုစ္ဆာတစ်ခုလုံး ပါနေရင် ပြန်ပို့ပြီး စမ်းကြည့်ပေးပါနော်။"""
-        )
-
-
-# ============================================================
-# TELEGRAM UPDATE
-# ============================================================
-
-def process_update(update):
-    message = update.get("message")
-
-    if not message:
-        return
-
-    chat = message.get("chat")
-    sender = message.get("from")
-
-    if not chat or not sender:
-        return
-
-    chat_id = chat.get("id")
-    user_id = sender.get("id")
-
-    if not chat_id or not user_id:
-        return
-
-    # TEXT
-    if message.get("text"):
-        text = message["text"].strip()
-
-        if text == "/start":
-            handle_start(
-                chat_id,
-                user_id
-            )
-        else:
-            handle_text(
-                chat_id,
-                user_id,
-                text
+            answer = ask_openai(
+                image_bytes=image_bytes
             )
 
-    # PHOTO
-    elif message.get("photo"):
-        handle_photo(
+            send_message(chat_id, answer)
+            return
+
+        # TEXT
+        if "text" in message:
+            text = message["text"].strip()
+
+            if not text:
+                return
+
+            answer = ask_openai(
+                text=text
+            )
+
+            send_message(chat_id, answer)
+            return
+
+    except Exception as e:
+        print("Handler error:", type(e).__name__, str(e))
+
+        send_message(
             chat_id,
-            user_id,
-            message
+            "တစ်ခုခုအမှားဖြစ်သွားပါတယ်။ ခဏနေပြီး ပြန်စမ်းကြည့်ပါ။"
         )
 
 
-# ============================================================
-# TELEGRAM LONG POLLING
-# ============================================================
+# =========================
+# BOT LOOP
+# =========================
 
-def telegram_polling():
+def bot_loop():
+    print("Bot started.")
+
     offset = None
-
-    print("Telegram bot polling started.")
 
     while True:
         try:
-            params = {
-                "timeout": 30,
-                "allowed_updates": '["message"]'
-            }
+            result = get_updates(offset)
 
-            if offset is not None:
-                params["offset"] = offset
+            if not result.get("ok"):
+                time.sleep(5)
+                continue
 
-            response = requests.get(
-                f"{TELEGRAM_API}/getUpdates",
-                params=params,
-                timeout=45
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            if not data.get("ok"):
-                raise RuntimeError(
-                    data.get(
-                        "description",
-                        "Telegram polling failed."
-                    )
-                )
-
-            updates = data.get(
-                "result",
-                []
-            )
+            updates = result.get("result", [])
 
             for update in updates:
                 offset = update["update_id"] + 1
 
-                try:
-                    process_update(update)
+                if "message" in update:
+                    handle_message(update["message"])
 
-                except Exception as error:
-                    print(
-                        "Update error:",
-                        type(error).__name__,
-                        str(error)
-                    )
-
-        except Exception as error:
-            print(
-                "Polling error:",
-                type(error).__name__,
-                str(error)
-            )
-
+        except Exception as e:
+            print("Bot loop error:", type(e).__name__, str(e))
             time.sleep(5)
 
 
-# ============================================================
-# START SERVER + BOT
-# ============================================================
+# =========================
+# RENDER HEALTH CHECK
+# =========================
+
+@app.route("/")
+def home():
+    return "Math Physics AI Tutor is running."
+
+
+@app.route("/health")
+def health():
+    return "OK"
+
+
+@app.route("/api/healthz")
+def healthz():
+    return jsonify({
+        "status": "ok",
+        "bot": "running"
+    })
+
+
+# =========================
+# START
+# =========================
 
 if __name__ == "__main__":
 
-    polling_thread = threading.Thread(
-        target=telegram_polling,
+    if not BOT_TOKEN:
+        print("ERROR: BOT_TOKEN is missing")
+
+    if not OPENAI_API_KEY:
+        print("ERROR: OPENAI_API_KEY is missing")
+
+    thread = threading.Thread(
+        target=bot_loop,
         daemon=True
     )
 
-    polling_thread.start()
+    thread.start()
 
-    print(
-        "Starting web server on port",
-        PORT
-    )
+    port = int(os.getenv("PORT", "10000"))
 
     app.run(
         host="0.0.0.0",
-        port=PORT
+        port=port
     )
