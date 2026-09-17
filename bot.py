@@ -1,13 +1,12 @@
 import os
 import time
 import base64
+import io
 import threading
 import traceback
 import textwrap
-import io
 
 import requests
-
 from flask import Flask, jsonify
 from PIL import Image, ImageDraw, ImageFont
 
@@ -19,47 +18,42 @@ from PIL import Image, ImageDraw, ImageFont
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-OPENAI_API = "https://api.openai.com/v1/responses"
 MODEL = "gpt-5.6-luna"
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+OPENAI_URL = "https://api.openai.com/v1/responses"
+
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
 # =========================================================
-# FLASK APP
+# FLASK
 # =========================================================
 
 app = Flask(__name__)
 
 
 # =========================================================
-# AI SYSTEM PROMPT
+# AI INSTRUCTIONS
 # =========================================================
 
 SYSTEM_PROMPT = """
 You are a Math and Physics AI Tutor for Myanmar students.
 
-The student may send a Math or Physics question as text or as an image.
+The student can send a Math or Physics question as text or as a photo.
 
 Read the question carefully.
 
-IMPORTANT:
-- Never guess if the image is unclear.
-- If the question cannot be read, say that the image is unclear and ask the student to send a clearer photo.
-- Solve the problem correctly.
-- Explain in simple Burmese.
-- Use step-by-step calculations.
-- Do not use Markdown.
-- Do not use LaTeX.
-- Do not use $ symbols.
-- Do not use \\ symbols.
-- Do not use code blocks.
+If the photo is unclear, do not guess.
+Tell the student to send a clearer photo.
+
+Solve the question correctly.
+
+Explain in simple Burmese.
 
 For Mathematics:
 Show the calculation step by step.
-Keep the explanation easy to understand.
 
-For Physics use this format:
+For Physics use:
 
 Given:
 Required:
@@ -68,25 +62,19 @@ Substitution:
 Calculation:
 Answer:
 
-Do not make the answer unnecessarily long.
+IMPORTANT:
+Do not use Markdown.
+Do not use LaTeX.
+Do not use dollar signs.
+Do not use code blocks.
+Do not use \\[ or \\].
 
-Return only the solution/explanation that should be shown to the student.
+Keep the answer clear and easy to copy into a notebook.
 """
 
 
 # =========================================================
-# BASIC CHECK
-# =========================================================
-
-if not BOT_TOKEN:
-    print("WARNING: BOT_TOKEN is missing.")
-
-if not OPENAI_API_KEY:
-    print("WARNING: OPENAI_API_KEY is missing.")
-
-
-# =========================================================
-# OPENAI RESPONSE TEXT EXTRACTOR
+# OPENAI RESPONSE TEXT
 # =========================================================
 
 def extract_answer(data):
@@ -94,19 +82,17 @@ def extract_answer(data):
     if not isinstance(data, dict):
         return ""
 
-    # Direct output_text
-    output_text = data.get("output_text")
+    direct = data.get("output_text")
 
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
 
-    # Nested output
     output = data.get("output", [])
 
     if not isinstance(output, list):
         return ""
 
-    parts = []
+    result = []
 
     for item in output:
 
@@ -121,26 +107,26 @@ def extract_answer(data):
         if not isinstance(content, list):
             continue
 
-        for content_item in content:
+        for part in content:
 
-            if not isinstance(content_item, dict):
+            if not isinstance(part, dict):
                 continue
 
-            if content_item.get("type") == "output_text":
+            if part.get("type") == "output_text":
 
-                text = content_item.get("text", "")
+                text = part.get("text", "")
 
-                if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
+                if isinstance(text, str):
+                    result.append(text)
 
-    return "\n".join(parts).strip()
+    return "\n".join(result).strip()
 
 
 # =========================================================
 # ASK OPENAI
 # =========================================================
 
-def ask_openai(text=None, image_bytes=None):
+def ask_openai(question=None, image_bytes=None):
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -149,24 +135,25 @@ def ask_openai(text=None, image_bytes=None):
 
     content = []
 
-    if text:
+    if question:
+
         content.append({
             "type": "input_text",
-            "text": text
+            "text": question
         })
 
     if image_bytes:
 
-        encoded = base64.b64encode(image_bytes).decode("utf-8")
-
-        image_url = (
-            "data:image/jpeg;base64,"
-            + encoded
-        )
+        encoded = base64.b64encode(
+            image_bytes
+        ).decode("utf-8")
 
         content.append({
             "type": "input_image",
-            "image_url": image_url,
+            "image_url": (
+                "data:image/jpeg;base64,"
+                + encoded
+            ),
             "detail": "high"
         })
 
@@ -183,7 +170,7 @@ def ask_openai(text=None, image_bytes=None):
     }
 
     response = requests.post(
-        OPENAI_API,
+        OPENAI_URL,
         headers=headers,
         json=payload,
         timeout=120
@@ -191,11 +178,17 @@ def ask_openai(text=None, image_bytes=None):
 
     if not response.ok:
 
-        print("OPENAI ERROR STATUS:", response.status_code)
-        print("OPENAI ERROR:", response.text)
+        print(
+            "OPENAI ERROR:",
+            response.status_code
+        )
+
+        print(
+            response.text
+        )
 
         raise Exception(
-            f"OpenAI API Error {response.status_code}"
+            "OpenAI API request failed"
         )
 
     data = response.json()
@@ -203,9 +196,122 @@ def ask_openai(text=None, image_bytes=None):
     answer = extract_answer(data)
 
     if not answer:
-        print("OPENAI RESPONSE:")
+
+        print("EMPTY OPENAI RESPONSE")
         print(data)
 
         raise Exception(
-            "OpenAI returned no answer."
-       
+            "OpenAI returned empty answer"
+        )
+
+    return answer
+
+
+# =========================================================
+# CLEAN ANSWER
+# =========================================================
+
+def clean_answer(text):
+
+    if not text:
+        return "အဖြေမရသေးပါ။"
+
+    replacements = [
+        ("\\[", ""),
+        ("\\]", ""),
+        ("\\(", ""),
+        ("\\)", ""),
+        ("$$", ""),
+        ("$", ""),
+        ("```", ""),
+        ("### ", ""),
+        ("## ", ""),
+        ("# ", "")
+    ]
+
+    for old, new in replacements:
+        text = text.replace(old, new)
+
+    return text.strip()
+
+
+# =========================================================
+# FONT
+# =========================================================
+
+def get_font(size=40, bold=False):
+
+    if bold:
+
+        paths = [
+            "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Bold.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansMyanmar-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        ]
+
+    else:
+
+        paths = [
+            "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansMyanmar-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        ]
+
+    for path in paths:
+
+        if os.path.exists(path):
+
+            return ImageFont.truetype(
+                path,
+                size
+            )
+
+    return ImageFont.load_default()
+
+
+# =========================================================
+# CREATE NOTEBOOK IMAGE
+# =========================================================
+
+def create_solution_image(solution):
+
+    solution = clean_answer(solution)
+
+    width = 1400
+    left = 150
+    top = 120
+    bottom = 100
+    line_height = 65
+
+    font = get_font(40, False)
+    bold_font = get_font(43, True)
+
+    raw_lines = solution.splitlines()
+
+    lines = []
+
+    for line in raw_lines:
+
+        if not line.strip():
+
+            lines.append("")
+            continue
+
+        wrapped = textwrap.wrap(
+            line,
+            width=48,
+            replace_whitespace=False
+        )
+
+        if wrapped:
+
+            lines.extend(wrapped)
+
+    height = max(
+        1000,
+        top + len(lines) * line_height + bottom
+    )
+
+    image = Image.new(
+        "RGB",
+        (
